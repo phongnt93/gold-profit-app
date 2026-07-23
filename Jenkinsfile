@@ -14,24 +14,36 @@ pipeline {
     stage('Checkout') {
       steps {
         checkout scm
+        script {
+          echo "Building image: ${DOCKER_IMAGE_NAME}:${IMAGE_TAG}"
+        }
       }
     }
 
-    stage('Install & Test') {
+    stage('Install & Test (inside Docker)') {
       steps {
+        // Chạy npm install & test bên trong container node:20,
+        // không phụ thuộc npm trên agent Jenkins
         sh '''
           set -o pipefail
-          npm install 2>&1 | tee install.log
-          npm test || echo "No tests yet" | tee -a install.log
+
+          echo "=== Running npm install & test inside node:20-alpine container ==="
+          docker run --rm \
+            -v "$PWD":/app \
+            -w /app \
+            node:20-alpine \
+            sh -c "npm install && (npm test || echo 'No tests yet')" \
+          2>&1 | tee install.log
         '''
       }
     }
 
     stage('Build Docker Image') {
       steps {
+        // dùng shared library buildDockerImage (sử dụng Docker daemon của host)
         sh '''
-          set -o pipefail
-          docker version 2>&1 | tee build.log
+          echo "=== Docker version on agent ==="
+          docker version
         '''
         buildDockerImage(DOCKER_IMAGE_NAME, IMAGE_TAG)
       }
@@ -58,46 +70,34 @@ pipeline {
 
   post {
     success {
-      echo "CI/CD done: ${DOCKER_IMAGE_NAME}:${IMAGE_TAG}"
+      echo "CI/CD done: ${DOCKER_IMAGE_NAME}:${IMAGE_TAG} pushed and manifest updated"
     }
 
     failure {
       echo "Build failed – sending logs to jenkins-log-agent via Perplexity Agent API..."
 
+      // Không dùng python nữa, tránh lỗi python: not found
       withCredentials([string(credentialsId: 'perplexity-api-key', variable: 'PPLX_API_KEY')]) {
         sh '''
-          set -e
+          set +e
 
-          # gom log của các stage quan trọng, lấy đoạn cuối để tránh quá dài
-          cat install.log build.log 2>/dev/null | tail -n 500 > ai_logs.txt || true
+          # Gom log, nếu không có build.log thì chỉ dùng install.log
+          if [ -f install.log ] || [ -f build.log ]; then
+            cat install.log build.log 2>/dev/null | tail -n 300 > ai_logs.txt
+          else
+            echo "No install/build logs available" > ai_logs.txt
+          fi
 
-          # tạo JSON request cho Agent API
-          python - << 'PY'
-import json, os
+          # Đơn giản hoá: escape cơ bản bằng cách thay " bằng '
+          LOG_RAW=$(cat ai_logs.txt | tail -n 300)
+          LOG_ESCAPED=${LOG_RAW//\"/\'}
 
-logs_path = "ai_logs.txt"
-if os.path.exists(logs_path):
-    logs = open(logs_path, "r", encoding="utf-8", errors="ignore").read()
-else:
-    logs = "No logs file found."
-
-payload = {
-    "preset": "fast-search",  # theo ví dụ Agent API /v1/responses
-    "input": (
-        "You are an expert DevOps & CI/CD assistant named jenkins-log-agent. "
-        "Analyze the following Jenkins pipeline logs from project 'gold-profit-app' "
-        "running on Kubernetes/OrbStack. Explain clearly:\n"
-        "1) The most likely root cause of the failure.\n"
-        "2) Which stage/command failed.\n"
-        "3) Concrete steps/commands the developer should try to fix it.\n\n"
-        "JENKINS LOGS (last lines):\\n"
-        + logs[-8000:]
-    )
+          cat > ai_request.json << EOF
+{
+  "preset": "fast-search",
+  "input": "You are jenkins-log-agent. Analyze this Jenkins pipeline failure for project 'gold-profit-app' running on Kubernetes/OrbStack. Explain: 1) root cause, 2) which stage/command failed, 3) concrete fix steps.\\n\\nJENKINS LOGS (last lines):\\n${LOG_ESCAPED}"
 }
-
-with open("ai_request.json", "w", encoding="utf-8") as f:
-    json.dump(payload, f)
-PY
+EOF
 
           echo "=== Calling Perplexity Agent API (jenkins-log-agent) ==="
 
@@ -105,7 +105,7 @@ PY
             -H "Authorization: Bearer ${PPLX_API_KEY}" \
             -H "Content-Type: application/json" \
             --data-binary @ai_request.json \
-            | sed 's/^/AI-Agent: /'
+            | sed 's/^/AI-Agent: /' || echo "AI-Agent call failed (curl error)"
         '''
       }
     }

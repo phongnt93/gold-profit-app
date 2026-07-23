@@ -24,11 +24,12 @@ pipeline {
     stage('Dummy Build Step') {
       steps {
         sh '''
-          echo "=== Dummy build step ==="
-          echo "Agent image does not have docker/node yet, so this step only simulates build."
-        '''        
+           echo "=== Dummy build step ==="
+           echo "Agent image does not have docker/node yet, so this step only simulates build."
+           #. Force an error to test AI agent integration
+           exit 1
+        '''
       }
-    }
   }
 
   post {

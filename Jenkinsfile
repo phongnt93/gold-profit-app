@@ -24,12 +24,13 @@ pipeline {
     stage('Dummy Build Step') {
       steps {
         sh '''
-           echo "=== Dummy build step ==="
-           echo "Agent image does not have docker/node yet, so this step only simulates build."
-           #. Force an error to test AI agent integration
-           exit 1
+          echo "=== Dummy build step ==="
+          echo "Agent image does not have docker/node yet, so this step only simulates build."
+          # Force an error to test AI agent integration
+          exit 1
         '''
       }
+    }
   }
 
   post {
@@ -44,13 +45,13 @@ pipeline {
         sh '''
           set +e
 
-          # Lấy 300 dòng cuối của log job từ file log của Jenkins step
-          # (ở đây đơn giản lấy lại log từ workspace nếu có)
+          # Lấy 300 dòng cuối của log job từ workspace (demo đơn giản)
           {
             echo "=== Jenkins workspace listing ==="
             ls -R .
           } > ai_logs.txt
 
+          # Escape dấu " để không vỡ JSON
           LOG_ESCAPED=$(sed 's/"/\\"/g' ai_logs.txt | tail -n 300)
 
           cat > ai_request.json << EOF

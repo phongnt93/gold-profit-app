@@ -1,0 +1,61 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gold-profit-app
+  namespace: gold-app
+  labels:
+    app: gold-profit-app
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: gold-profit-app
+  template:
+    metadata:
+      labels:
+        app: gold-profit-app
+    spec:
+      containers:
+        - name: gold-profit-app
+          # Jenkins sẽ thay IMAGE_PLACEHOLDER bằng image đầy đủ,
+          # ví dụ: phongnt93/gold-profit-app:BUILD_NUMBER
+          image: IMAGE_PLACEHOLDER
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8080
+          envFrom:
+            - configMapRef:
+                name: gold-profit-app-config
+          # nếu muốn override rõ:
+          # env:
+          #   - name: PORT
+          #     valueFrom:
+          #       configMapKeyRef:
+          #         name: gold-profit-app-config
+          #         key: PORT
+          volumeMounts:
+            - name: data
+              mountPath: /app/data
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: 8080
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: gold-app-data-pvc

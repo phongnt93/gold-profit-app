@@ -1,0 +1,18 @@
+{
+  "name": "gold-profit-app",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Gold Profit App with SQLite, Docker, GitHub Actions and Kubernetes manifests",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node -e \"console.log('No automated tests yet')\""
+  },
+  "dependencies": {
+    "sqlite3": "^5.1.7",
+    "express": "^4.21.2"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

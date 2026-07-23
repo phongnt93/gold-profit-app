@@ -1,0 +1,13 @@
+services:
+  gold-profit-app:
+    build: .
+    container_name: gold-profit-app
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./data:/app/data
+    environment:
+      - PORT=8080
+      - DATA_DIR=/app/data
+      - DB_PATH=/app/data/gold.db
+    restart: unless-stopped

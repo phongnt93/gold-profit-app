@@ -1,38 +1,3 @@
-@Library('jenkins-shared-library') _
-
-pipeline {
-  agent any
-
-  environment {
-    DOCKER_IMAGE_NAME = 'nguyenphong8852/gold-profit-app'
-    IMAGE_TAG         = "${BUILD_NUMBER}"
-    MANIFEST_FILE     = 'k8s-manifests/deployment.yaml'
-    APP_REPO_URL      = 'https://github.com/phongnt93/gold-profit-app.git'
-  }
-
-  stages {
-    stage('Checkout') {
-      steps {
-        checkout scm
-        script {
-          echo "Preparing build for: ${DOCKER_IMAGE_NAME}:${IMAGE_TAG}"
-        }
-      }
-    }
-
-    // Tạm thời KHÔNG chạy npm hay docker ở đây để tránh lỗi môi trường agent
-    stage('Dummy Build Step') {
-      steps {
-        sh '''
-          echo "=== Dummy build step ==="
-          echo "Agent image does not have docker/node yet, so this step only simulates build."
-          # Force an error to test AI agent integration
-          exit 1
-        '''
-      }
-    }
-  }
-
   post {
     success {
       echo "Pipeline finished successfully (dummy build)."
@@ -45,19 +10,19 @@ pipeline {
         sh '''
           set +e
 
-          # Lấy 300 dòng cuối của log job từ workspace (demo đơn giản)
+          # Gom thông tin workspace làm "log" demo
           {
             echo "=== Jenkins workspace listing ==="
             ls -R .
           } > ai_logs.txt
 
-          # Escape dấu " để không vỡ JSON
-          LOG_ESCAPED=$(sed 's/"/\\"/g' ai_logs.txt | tail -n 300)
+          # Mã hoá log thành base64 để tránh lỗi JSON với \\n, \", ...
+          LOG_B64=$(base64 -w0 ai_logs.txt 2>/dev/null || base64 ai_logs.txt)
 
           cat > ai_request.json << EOF
 {
   "preset": "fast-search",
-  "input": "You are jenkins-log-agent. Analyze this Jenkins pipeline failure for project 'gold-profit-app' on Jenkins+k8s OrbStack. Explain: 1) root cause, 2) which stage/command failed, 3) concrete fix steps.\\n\\nJENKINS LOGS (last lines):\\n${LOG_ESCAPED}"
+  "input": "You are jenkins-log-agent. The Jenkins pipeline for project 'gold-profit-app' on Jenkins+k8s OrbStack has FAILED. I will provide the logs encoded as base64.\\n\\n1) Decode the base64 string back to text.\\n2) Analyze the failure: root cause, which stage/command failed, and concrete fix steps.\\n\\nBASE64-ENCODED LOGS:\\n${LOG_B64}"
 }
 EOF
 
@@ -72,4 +37,3 @@ EOF
       }
     }
   }
-}

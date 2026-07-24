@@ -1,3 +1,39 @@
+@Library('jenkins-shared-library') _
+
+pipeline {
+  agent any
+
+  environment {
+    DOCKER_IMAGE_NAME = 'nguyenphong8852/gold-profit-app'
+    IMAGE_TAG         = "${BUILD_NUMBER}"
+    MANIFEST_FILE     = 'k8s-manifests/deployment.yaml'
+    APP_REPO_URL      = 'https://github.com/phongnt93/gold-profit-app.git'
+  }
+
+  stages {
+    stage('Checkout') {
+      steps {
+        checkout scm
+        script {
+          echo "Preparing build for: ${DOCKER_IMAGE_NAME}:${IMAGE_TAG}"
+        }
+      }
+    }
+
+    // Tạm thời KHÔNG chạy npm hay docker ở đây để tránh lỗi môi trường agent
+    // Dummy step để test AI agent khi pipeline FAIL
+    stage('Dummy Build Step') {
+      steps {
+        sh '''
+          echo "=== Dummy build step ==="
+          echo "Agent image does not have docker/node yet, so this step only simulates build."
+          # Force an error to test AI agent integration
+          exit 1
+        '''
+      }
+    }
+  }
+
   post {
     success {
       echo "Pipeline finished successfully (dummy build)."
@@ -37,3 +73,4 @@ EOF
       }
     }
   }
+}

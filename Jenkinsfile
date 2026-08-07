@@ -11,61 +11,48 @@ pipeline {
   }
 
   stages {
+    // ====== BUILD STAGES THỰC ======
     stage('Checkout') {
       steps {
         checkout scm
         script {
-          echo "Preparing build for: ${DOCKER_IMAGE_NAME}:${IMAGE_TAG}"
+          echo "Building image: ${DOCKER_IMAGE_NAME}:${IMAGE_TAG}"
         }
       }
     }
 
-    stage('Dummy Build') {
+    stage('Build Docker Image') {
       steps {
-        // Cho phép stage fail nhưng pipeline tiếp tục sang AI
-        catchError(buildResult: 'FAILURE', stageResult: 'FAILURE') {
-          sh '''
-            set -e
-
-            echo "=== Dummy build step for gold-profit-app ==="
-            echo "[Env] Jenkins + Kubernetes (OrbStack) agent."
-            echo "[Info] This step simulates typical CI/CD failures."
-            echo
-
-            echo "[Build] Running npm install..."
-            echo "ERROR: npm not found on this agent."
-            echo
-
-            echo "[Build] Running docker build..."
-            echo "ERROR: Docker daemon is not running."
-            echo
-
-            echo "[Result] Simulating build failure for AI analysis."
-            exit 1
-          '''
-        }
+        // Hàm từ jenkins-shared-library của bạn
+        buildDockerImage(DOCKER_IMAGE_NAME, IMAGE_TAG)
       }
     }
 
-    // ================== AI STAGES (luôn chạy, nhưng biết build đã FAIL) ==================
+    stage('Push to Docker Hub') {
+      steps {
+        // Hàm từ jenkins-shared-library, dùng credentials ID dockerhub-credentials
+        pushToDockerHub(DOCKER_IMAGE_NAME, IMAGE_TAG, 'dockerhub-credentials')
+      }
+    }
+
+    // ====== AI STAGES (phân tích khi build FAIL) ======
 
     stage('Prepare AI Log') {
+      when {
+        expression { currentBuild.currentResult == 'FAILURE' }
+      }
       steps {
         script {
-          // Nếu sau này muốn dùng console log thực, có thể thay nội dung này
+          // Ở bản đầu bạn dùng log giả; giờ nên dùng log thực nếu muốn:
+          // ví dụ: lấy từ file log build, hoặc copy từ console.
+          // Tạm thời vẫn để mẫu, sau có thể thay bằng log thật.
           writeFile(
             file: 'jenkins.log',
             text: '''
-[Checkout] SUCCESS
-
 [Build]
-Running npm install...
-ERROR: npm not found on this agent.
+Checkout, Docker build or push failed for gold-profit-app.
 
-Running docker build...
-ERROR: Docker daemon is not running.
-
-Build failed with exit code 1.
+See Jenkins console log for full details.
 '''
           )
           echo "[AI] Prepared jenkins.log for analysis."
@@ -74,6 +61,9 @@ Build failed with exit code 1.
     }
 
     stage('Create AI Request') {
+      when {
+        expression { currentBuild.currentResult == 'FAILURE' }
+      }
       steps {
         script {
           def log = readFile('jenkins.log')
@@ -83,7 +73,7 @@ You are an expert DevOps AI specializing in Jenkins, Docker, Kubernetes, Helm an
 
 This is a Jenkins pipeline for project 'gold-profit-app' running on Jenkins + Kubernetes (OrbStack).
 
-Analyze the Jenkins build log.
+Analyze the Jenkins build log and determine what failed (checkout, docker build, or docker push).
 
 Return ONLY ONE valid JSON object.
 
@@ -122,6 +112,9 @@ ${log}
     }
 
     stage('Call Perplexity') {
+      when {
+        expression { currentBuild.currentResult == 'FAILURE' }
+      }
       steps {
         withCredentials([
           string(
@@ -150,6 +143,9 @@ ${log}
     }
 
     stage('Parse AI Response') {
+      when {
+        expression { currentBuild.currentResult == 'FAILURE' }
+      }
       steps {
         script {
           def resp = readJSON file: "ai-response.json"
@@ -177,7 +173,6 @@ ${log}
             json: ai
           )
 
-          // Build description vẫn thể hiện đây là FAILURE
           currentBuild.description = """
 ❌ ${ai.severity ?: 'UNKNOWN'}
 
@@ -248,6 +243,9 @@ Confidence: ${ai.confidence ?: 0}
     }
 
     stage('Publish AI Report') {
+      when {
+        expression { currentBuild.currentResult == 'FAILURE' }
+      }
       steps {
         publishHTML(target: [
           reportDir: '.',

@@ -20,27 +20,36 @@ pipeline {
       }
     }
 
-    // Stage build giả lập – cố tình FAIL để test AI
-    stage('Dummy Build Step') {
+    /**
+     * Dummy build stage: hiện tại chỉ mô phỏng lỗi môi trường
+     * (thiếu npm, docker) để test AI phân tích log.
+     * Sau này có thể thay bằng npm build + docker build thực tế.
+     */
+    stage('Dummy Build') {
       steps {
         sh '''
+          set -e
+
           echo "=== Dummy build step for gold-profit-app ==="
-          echo "Agent image does not have docker/node yet, so this step only simulates build."
-          echo "Trying to run npm and docker to simulate typical CI/CD failure..."
+          echo "[Env] Jenkins + Kubernetes (OrbStack) agent."
+          echo "[Info] This step simulates typical CI/CD failures."
+          echo
 
           echo "[Build] Running npm install..."
           echo "ERROR: npm not found on this agent."
+          echo
 
           echo "[Build] Running docker build..."
           echo "ERROR: Docker daemon is not running."
+          echo
 
-          # Force an error to test AI analysis
+          echo "[Result] Simulating build failure for AI analysis."
           exit 1
         '''
       }
     }
 
-    // ====== AI STAGES (áp dụng từ Jenkinsfile test) ======
+    // ================== AI STAGES (chỉ chạy khi FAIL) ==================
 
     stage('Prepare AI Log') {
       when {
@@ -48,8 +57,7 @@ pipeline {
       }
       steps {
         script {
-          // Lấy console log của build hiện tại lưu vào jenkins.log (đơn giản hóa)
-          // Nếu cần log đầy đủ, có thể dùng manager.build.logFile hoặc API khác
+          // Tạm thời dùng log mẫu; sau này có thể thay bằng log thực
           writeFile(
             file: 'jenkins.log',
             text: '''
@@ -65,6 +73,7 @@ ERROR: Docker daemon is not running.
 Build failed with exit code 1.
 '''
           )
+          echo "[AI] Prepared jenkins.log for analysis."
         }
       }
     }
@@ -114,6 +123,8 @@ ${log}
               input : prompt
             ]
           )
+
+          echo "[AI] Created ai-request.json for Perplexity."
         }
       }
     }
@@ -130,19 +141,21 @@ ${log}
           )
         ]) {
           sh '''
-set -e
+            set -e
 
-echo "=== Calling Perplexity AI for gold-profit-app ==="
+            echo "[AI] Calling Perplexity for gold-profit-app..."
 
-curl -sS https://api.perplexity.ai/v1/responses \
-  -H "Authorization: Bearer ${PPLX_API_KEY}" \
-  -H "Content-Type: application/json" \
-  --data-binary @ai-request.json \
-  -o ai-response.json
+            curl -sS https://api.perplexity.ai/v1/responses \
+              -H "Authorization: Bearer ${PPLX_API_KEY}" \
+              -H "Content-Type: application/json" \
+              --data-binary @ai-request.json \
+              -o ai-response.json
 
-echo "========== RAW AI RESPONSE =========="
-cat ai-response.json
-'''
+            echo "[AI] Raw response from Perplexity:"
+            echo "===================================="
+            cat ai-response.json
+            echo "===================================="
+          '''
         }
       }
     }
@@ -155,30 +168,20 @@ cat ai-response.json
         script {
           def resp = readJSON file: "ai-response.json"
 
-          /*
-           * Perplexity Response:
-           *
-           * output:
-           *   - search_results
-           *   - message
-           */
-
           def message = resp.output.find { it.type == "message" }
-
-          if (message == null) {
-            error("Cannot find message object in AI response.")
+          if (!message) {
+            error "[AI] Cannot find message object in AI response."
           }
 
-          def textBlock = message.content.find {
-            it.type == "output_text"
+          def textBlock = message.content.find { it.type == "output_text" }
+          if (!textBlock) {
+            error "[AI] Cannot find output_text in AI response."
           }
 
-          if (textBlock == null) {
-            error("Cannot find output_text in AI response.")
-          }
-
-          echo "=========== AI JSON (raw text) ==========="
+          echo "[AI] Received JSON text from Perplexity:"
+          echo "===================================="
           echo textBlock.text
+          echo "===================================="
 
           def ai = readJSON text: textBlock.text
 
@@ -188,101 +191,63 @@ cat ai-response.json
             json: ai
           )
 
-          // Cập nhật description cho build của gold-profit-app
+          // Build description gọn, rõ severity + summary + confidence
           currentBuild.description = """
-❌ ${ai.severity}
+❌ ${ai.severity ?: 'UNKNOWN'}
 
-${ai.summary}
+${ai.summary ?: 'No summary provided.'}
 
-Confidence: ${ai.confidence}
+Confidence: ${ai.confidence ?: 0}
 """
 
-          // Sinh HTML report cho gold-profit-app
           def actions = ai.suggested_actions instanceof List ? ai.suggested_actions : []
 
           def html = """
 <html>
-
 <head>
-
-<title>AI Analysis - gold-profit-app</title>
-
-<style>
-
-body{
-font-family:Arial;
-margin:30px;
-}
-
-table{
-width:100%;
-border-collapse:collapse;
-}
-
-td,th{
-border:1px solid #ddd;
-padding:8px;
-}
-
-th{
-background:#efefef;
-}
-
-</style>
-
+  <title>AI Analysis - gold-profit-app</title>
+  <style>
+    body{
+      font-family:Arial, sans-serif;
+      margin:30px;
+    }
+    table{
+      width:100%;
+      border-collapse:collapse;
+    }
+    td,th{
+      border:1px solid #ddd;
+      padding:8px;
+    }
+    th{
+      background:#efefef;
+      text-align:left;
+    }
+    h2, h3{
+      margin-top:24px;
+    }
+  </style>
 </head>
-
 <body>
 
-<h2>AI Analysis for gold-profit-app</h2>
+  <h2>AI Analysis for gold-profit-app</h2>
 
-<table>
+  <table>
+    <tr><th>Status</th><td>${ai.status}</td></tr>
+    <tr><th>Stage</th><td>${ai.stage}</td></tr>
+    <tr><th>Severity</th><td>${ai.severity}</td></tr>
+    <tr><th>Root Cause</th><td>${ai.root_cause}</td></tr>
+    <tr><th>Summary</th><td>${ai.summary}</td></tr>
+    <tr><th>Confidence</th><td>${ai.confidence}</td></tr>
+    <tr><th>Affected Component</th><td>${ai.affected_component}</td></tr>
+  </table>
 
-<tr>
-<th>Status</th>
-<td>${ai.status}</td>
-</tr>
-
-<tr>
-<th>Stage</th>
-<td>${ai.stage}</td>
-</tr>
-
-<tr>
-<th>Severity</th>
-<td>${ai.severity}</td>
-</tr>
-
-<tr>
-<th>Root Cause</th>
-<td>${ai.root_cause}</td>
-</tr>
-
-<tr>
-<th>Summary</th>
-<td>${ai.summary}</td>
-</tr>
-
-<tr>
-<th>Confidence</th>
-<td>${ai.confidence}</td>
-</tr>
-
-<tr>
-<th>Affected Component</th>
-<td>${ai.affected_component}</td>
-</tr>
-
-</table>
-
-<h3>Suggested Actions</h3>
-
-<ul>
-${actions.collect { "<li>${it}</li>" }.join("\\n")}
-</ul>
+  <h3>Suggested Actions</h3>
+  <ul>
+    ${actions.collect { "<li>${it}</li>" }.join("\\n")}
+  </ul>
 
 </body>
-
 </html>
 """
 
@@ -290,11 +255,13 @@ ${actions.collect { "<li>${it}</li>" }.join("\\n")}
             file: "ai-summary.html",
             text: html
           )
+
+          echo "[AI] Wrote ai-summary.json and ai-summary.html."
         }
       }
     }
 
-    stage('Publish HTML') {
+    stage('Publish AI Report') {
       when {
         expression { currentBuild.currentResult == 'FAILURE' }
       }
@@ -306,17 +273,19 @@ ${actions.collect { "<li>${it}</li>" }.join("\\n")}
           keepAll: true,
           alwaysLinkToLastBuild: true
         ])
+
+        echo "[AI] Published AI Analysis HTML report."
       }
     }
   }
 
   post {
     success {
-      echo "Pipeline finished successfully for gold-profit-app."
+      echo "✅ Pipeline finished successfully for gold-profit-app."
     }
 
     failure {
-      echo "Build failed for gold-profit-app – AI analysis generated."
+      echo "❌ Pipeline failed for gold-profit-app – AI analysis generated (check report & description)."
     }
 
     always {

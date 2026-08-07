@@ -20,44 +20,39 @@ pipeline {
       }
     }
 
-    /**
-     * Dummy build stage: hiện tại chỉ mô phỏng lỗi môi trường
-     * (thiếu npm, docker) để test AI phân tích log.
-     * Sau này có thể thay bằng npm build + docker build thực tế.
-     */
     stage('Dummy Build') {
       steps {
-        sh '''
-          set -e
+        // Cho phép stage fail nhưng pipeline tiếp tục sang AI
+        catchError(buildResult: 'FAILURE', stageResult: 'FAILURE') {
+          sh '''
+            set -e
 
-          echo "=== Dummy build step for gold-profit-app ==="
-          echo "[Env] Jenkins + Kubernetes (OrbStack) agent."
-          echo "[Info] This step simulates typical CI/CD failures."
-          echo
+            echo "=== Dummy build step for gold-profit-app ==="
+            echo "[Env] Jenkins + Kubernetes (OrbStack) agent."
+            echo "[Info] This step simulates typical CI/CD failures."
+            echo
 
-          echo "[Build] Running npm install..."
-          echo "ERROR: npm not found on this agent."
-          echo
+            echo "[Build] Running npm install..."
+            echo "ERROR: npm not found on this agent."
+            echo
 
-          echo "[Build] Running docker build..."
-          echo "ERROR: Docker daemon is not running."
-          echo
+            echo "[Build] Running docker build..."
+            echo "ERROR: Docker daemon is not running."
+            echo
 
-          echo "[Result] Simulating build failure for AI analysis."
-          exit 1
-        '''
+            echo "[Result] Simulating build failure for AI analysis."
+            exit 1
+          '''
+        }
       }
     }
 
-    // ================== AI STAGES (chỉ chạy khi FAIL) ==================
+    // ================== AI STAGES (luôn chạy, nhưng biết build đã FAIL) ==================
 
     stage('Prepare AI Log') {
-      when {
-        expression { currentBuild.currentResult == 'FAILURE' }
-      }
       steps {
         script {
-          // Tạm thời dùng log mẫu; sau này có thể thay bằng log thực
+          // Nếu sau này muốn dùng console log thực, có thể thay nội dung này
           writeFile(
             file: 'jenkins.log',
             text: '''
@@ -79,9 +74,6 @@ Build failed with exit code 1.
     }
 
     stage('Create AI Request') {
-      when {
-        expression { currentBuild.currentResult == 'FAILURE' }
-      }
       steps {
         script {
           def log = readFile('jenkins.log')
@@ -130,9 +122,6 @@ ${log}
     }
 
     stage('Call Perplexity') {
-      when {
-        expression { currentBuild.currentResult == 'FAILURE' }
-      }
       steps {
         withCredentials([
           string(
@@ -161,9 +150,6 @@ ${log}
     }
 
     stage('Parse AI Response') {
-      when {
-        expression { currentBuild.currentResult == 'FAILURE' }
-      }
       steps {
         script {
           def resp = readJSON file: "ai-response.json"
@@ -191,7 +177,7 @@ ${log}
             json: ai
           )
 
-          // Build description gọn, rõ severity + summary + confidence
+          // Build description vẫn thể hiện đây là FAILURE
           currentBuild.description = """
 ❌ ${ai.severity ?: 'UNKNOWN'}
 
@@ -262,9 +248,6 @@ Confidence: ${ai.confidence ?: 0}
     }
 
     stage('Publish AI Report') {
-      when {
-        expression { currentBuild.currentResult == 'FAILURE' }
-      }
       steps {
         publishHTML(target: [
           reportDir: '.',

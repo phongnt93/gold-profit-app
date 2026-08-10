@@ -1,282 +1,1032 @@
 @Library('jenkins-shared-library') _
 
 pipeline {
-  agent any
 
-  environment {
+```
+agent any
+
+environment {
     DOCKER_IMAGE_NAME = 'nguyenphong8852/gold-profit-app'
-    IMAGE_TAG         = "${BUILD_NUMBER}"
-    MANIFEST_FILE     = 'k8s-manifests/deployment.yaml'
-    APP_REPO_URL      = 'https://github.com/phongnt93/gold-profit-app.git'
-  }
+    IMAGE_TAG        = "${BUILD_NUMBER}"
+    MANIFEST_FILE    = 'k8s-manifests/deployment.yaml'
+    APP_REPO_URL     = 'https://github.com/phongnt93/gold-profit-app.git'
+}
 
-  stages {
-    // ====== BUILD STAGES THỰC ======
+stages {
+
+    // =========================================================
+    // CHECKOUT
+    // =========================================================
     stage('Checkout') {
-      steps {
-        checkout scm
-        script {
-          echo "Building image: ${DOCKER_IMAGE_NAME}:${IMAGE_TAG}"
+        steps {
+
+            checkout scm
+
+            script {
+                echo "=========================================="
+                echo "Application : gold-profit-app"
+                echo "Docker Image: ${DOCKER_IMAGE_NAME}:${IMAGE_TAG}"
+                echo "Build       : #${BUILD_NUMBER}"
+                echo "=========================================="
+            }
         }
-      }
     }
 
+    // =========================================================
+    // BUILD DOCKER IMAGE
+    // =========================================================
     stage('Build Docker Image') {
-      steps {
-        // Hàm từ jenkins-shared-library của bạn
-        buildDockerImage(DOCKER_IMAGE_NAME, IMAGE_TAG)
-      }
-    }
+        steps {
 
-    stage('Push to Docker Hub') {
-      steps {
-        // Hàm từ jenkins-shared-library, dùng credentials ID dockerhub-credentials
-        pushToDockerHub(DOCKER_IMAGE_NAME, IMAGE_TAG, 'dockerhub-credentials')
-      }
-    }
-
-    // ====== AI STAGES (phân tích khi build FAIL) ======
-
-    stage('Prepare AI Log') {
-      when {
-        expression { currentBuild.currentResult == 'FAILURE' }
-      }
-      steps {
-        script {
-          // Ở bản đầu bạn dùng log giả; giờ nên dùng log thực nếu muốn:
-          // ví dụ: lấy từ file log build, hoặc copy từ console.
-          // Tạm thời vẫn để mẫu, sau có thể thay bằng log thật.
-          writeFile(
-            file: 'jenkins.log',
-            text: '''
-[Build]
-Checkout, Docker build or push failed for gold-profit-app.
-
-See Jenkins console log for full details.
-'''
-          )
-          echo "[AI] Prepared jenkins.log for analysis."
+            buildDockerImage(
+                DOCKER_IMAGE_NAME,
+                IMAGE_TAG
+            )
         }
-      }
     }
 
-    stage('Create AI Request') {
-      when {
-        expression { currentBuild.currentResult == 'FAILURE' }
-      }
-      steps {
+    // =========================================================
+    // PUSH DOCKER IMAGE
+    // =========================================================
+    stage('Push to Docker Hub') {
+        steps {
+
+            pushToDockerHub(
+                DOCKER_IMAGE_NAME,
+                IMAGE_TAG,
+                'dockerhub-credentials'
+            )
+        }
+    }
+}
+
+// =============================================================
+// POST
+// =============================================================
+post {
+
+    // =========================================================
+    // SUCCESS
+    // =========================================================
+    success {
+
+        echo "=========================================="
+        echo "✅ Pipeline completed successfully"
+        echo "Application : gold-profit-app"
+        echo "Image       : ${DOCKER_IMAGE_NAME}:${IMAGE_TAG}"
+        echo "=========================================="
+    }
+
+    // =========================================================
+    // FAILURE
+    // =========================================================
+    failure {
+
         script {
-          def log = readFile('jenkins.log')
 
-          def prompt = """
-You are an expert DevOps AI specializing in Jenkins, Docker, Kubernetes, Helm and ArgoCD.
+            echo "=========================================="
+            echo "❌ Jenkins Pipeline FAILED"
+            echo "🤖 Starting DevOps AI Agent..."
+            echo "=========================================="
 
-This is a Jenkins pipeline for project 'gold-profit-app' running on Jenkins + Kubernetes (OrbStack).
+            try {
 
-Analyze the Jenkins build log and determine what failed (checkout, docker build, or docker push).
+                // =================================================
+                // 1. GET REAL JENKINS LOG
+                // =================================================
 
-Return ONLY ONE valid JSON object.
+                def fullLog = currentBuild.rawBuild
+                    .getLog(15000)
+                    .join('\n')
 
-Do NOT use markdown.
+                writeFile(
+                    file: 'jenkins-full.log',
+                    text: fullLog
+                )
+
+                echo "[AI] Full Jenkins log collected."
+
+                // =================================================
+                // 2. EXTRACT IMPORTANT ERROR SECTION
+                // =================================================
+
+                def lines = fullLog.readLines()
+
+                def importantLines = []
+
+                lines.eachWithIndex { line, index ->
+
+                    def lower = line.toLowerCase()
+
+                    if (
+                        lower.contains('error') ||
+                        lower.contains('failed') ||
+                        lower.contains('failure') ||
+                        lower.contains('exception') ||
+                        lower.contains('fatal') ||
+                        lower.contains('denied') ||
+                        lower.contains('timeout') ||
+                        lower.contains('unauthorized') ||
+                        lower.contains('forbidden') ||
+                        lower.contains('not found') ||
+                        lower.contains('no such file') ||
+                        lower.contains('connection refused') ||
+                        lower.contains('exit code') ||
+                        lower.contains('exit status')
+                    ) {
+
+                        def start = Math.max(0, index - 5)
+                        def end   = Math.min(lines.size(), index + 8)
+
+                        for (int i = start; i < end; i++) {
+
+                            if (!importantLines.contains(lines[i])) {
+                                importantLines.add(lines[i])
+                            }
+                        }
+                    }
+                }
+
+                // =================================================
+                // LIMIT EXTRACTED LOG SIZE
+                // =================================================
+
+                def extractedLog = importantLines.join('\n')
+
+                if (extractedLog.length() > 30000) {
+
+                    extractedLog =
+                        extractedLog.substring(
+                            extractedLog.length() - 30000
+                        )
+                }
+
+                if (!extractedLog?.trim()) {
+
+                    extractedLog =
+                        "No obvious error pattern found. Analyze the full log."
+                }
+
+                writeFile(
+                    file: 'jenkins-error.log',
+                    text: extractedLog
+                )
+
+                echo "=========================================="
+                echo "[AI] Extracted error section"
+                echo "=========================================="
+                echo extractedLog
+                echo "=========================================="
+
+                // =================================================
+                // 3. COLLECT DEVOPS DIAGNOSTICS
+                // =================================================
+
+                echo "[AI] Collecting DevOps diagnostics..."
+
+                // -------------------------------------------------
+                // Git diagnostics
+                // -------------------------------------------------
+
+                sh '''
+                    set +e
+
+                    echo "===== GIT STATUS =====" \
+                        > git-diagnostics.log
+
+                    git status \
+                        --short \
+                        >> git-diagnostics.log 2>&1
+
+                    echo "" >> git-diagnostics.log
+                    echo "===== GIT BRANCH =====" \
+                        >> git-diagnostics.log
+
+                    git branch --show-current \
+                        >> git-diagnostics.log 2>&1
+
+                    echo "" >> git-diagnostics.log
+                    echo "===== GIT LAST COMMIT =====" \
+                        >> git-diagnostics.log
+
+                    git log -1 --oneline \
+                        >> git-diagnostics.log 2>&1
+                '''
+
+                // -------------------------------------------------
+                // Docker diagnostics
+                // -------------------------------------------------
+
+                sh '''
+                    set +e
+
+                    echo "===== DOCKER VERSION =====" \
+                        > docker-diagnostics.log
+
+                    docker version \
+                        >> docker-diagnostics.log 2>&1
+
+                    echo "" >> docker-diagnostics.log
+                    echo "===== DOCKER INFO =====" \
+                        >> docker-diagnostics.log
+
+                    docker info \
+                        >> docker-diagnostics.log 2>&1
+
+                    echo "" >> docker-diagnostics.log
+                    echo "===== IMAGE =====" \
+                        >> docker-diagnostics.log
+
+                    docker images \
+                        "${DOCKER_IMAGE_NAME}" \
+                        >> docker-diagnostics.log 2>&1
+                '''
+
+                // -------------------------------------------------
+                // Kubernetes diagnostics
+                // -------------------------------------------------
+
+                sh '''
+                    set +e
+
+                    if command -v kubectl >/dev/null 2>&1; then
+
+                        echo "===== KUBECTL VERSION =====" \
+                            > k8s-diagnostics.log
+
+                        kubectl version --client \
+                            >> k8s-diagnostics.log 2>&1
+
+                        echo "" >> k8s-diagnostics.log
+                        echo "===== KUBECTL CONTEXT =====" \
+                            >> k8s-diagnostics.log
+
+                        kubectl config current-context \
+                            >> k8s-diagnostics.log 2>&1
+
+                        echo "" >> k8s-diagnostics.log
+                        echo "===== PODS =====" \
+                            >> k8s-diagnostics.log
+
+                        kubectl get pods -A \
+                            -o wide \
+                            >> k8s-diagnostics.log 2>&1
+
+                        echo "" >> k8s-diagnostics.log
+                        echo "===== RECENT EVENTS =====" \
+                            >> k8s-diagnostics.log
+
+                        kubectl get events -A \
+                            --sort-by=.lastTimestamp \
+                            | tail -100 \
+                            >> k8s-diagnostics.log 2>&1
+
+                    else
+
+                        echo "kubectl is not installed." \
+                            > k8s-diagnostics.log
+
+                    fi
+                '''
+
+                // -------------------------------------------------
+                // Helm diagnostics
+                // -------------------------------------------------
+
+                sh '''
+                    set +e
+
+                    if command -v helm >/dev/null 2>&1; then
+
+                        echo "===== HELM VERSION =====" \
+                            > helm-diagnostics.log
+
+                        helm version \
+                            >> helm-diagnostics.log 2>&1
+
+                        echo "" >> helm-diagnostics.log
+                        echo "===== HELM REPOSITORIES =====" \
+                            >> helm-diagnostics.log
+
+                        helm repo list \
+                            >> helm-diagnostics.log 2>&1
+
+                        echo "" >> helm-diagnostics.log
+                        echo "===== HELM RELEASES =====" \
+                            >> helm-diagnostics.log
+
+                        helm list -A \
+                            >> helm-diagnostics.log 2>&1
+
+                    else
+
+                        echo "helm is not installed." \
+                            > helm-diagnostics.log
+
+                    fi
+                '''
+
+                // =================================================
+                // 4. COMBINE DIAGNOSTICS
+                // =================================================
+
+                sh '''
+                    echo "========================================" \
+                        > devops-diagnostics.log
+
+                    echo "GIT DIAGNOSTICS" \
+                        >> devops-diagnostics.log
+
+                    cat git-diagnostics.log \
+                        >> devops-diagnostics.log 2>&1
+
+                    echo "" >> devops-diagnostics.log
+                    echo "========================================" \
+                        >> devops-diagnostics.log
+
+                    echo "DOCKER DIAGNOSTICS" \
+                        >> devops-diagnostics.log
+
+                    cat docker-diagnostics.log \
+                        >> devops-diagnostics.log 2>&1
+
+                    echo "" >> devops-diagnostics.log
+                    echo "========================================" \
+                        >> devops-diagnostics.log
+
+                    echo "KUBERNETES DIAGNOSTICS" \
+                        >> devops-diagnostics.log
+
+                    cat k8s-diagnostics.log \
+                        >> devops-diagnostics.log 2>&1
+
+                    echo "" >> devops-diagnostics.log
+                    echo "========================================" \
+                        >> devops-diagnostics.log
+
+                    echo "HELM DIAGNOSTICS" \
+                        >> devops-diagnostics.log
+
+                    cat helm-diagnostics.log \
+                        >> devops-diagnostics.log 2>&1
+                '''
+
+                def diagnostics =
+                    readFile('devops-diagnostics.log')
+
+                // =================================================
+                // LIMIT DIAGNOSTICS
+                // =================================================
+
+                if (diagnostics.length() > 40000) {
+
+                    diagnostics =
+                        diagnostics.substring(
+                            diagnostics.length() - 40000
+                        )
+                }
+
+                // =================================================
+                // 5. CREATE AI AGENT PROMPT
+                // =================================================
+
+                def prompt = """
+```
+
+You are an expert DevOps AI Agent.
+
+You specialize in:
+
+* Jenkins
+* Linux
+* Git
+* Docker
+* Kubernetes
+* Helm
+* ArgoCD
+* CI/CD
+* Networking
+* Container troubleshooting
+
+You are analyzing a FAILED Jenkins pipeline.
+
+==================================================
+PIPELINE
+========
+
+Application:
+gold-profit-app
+
+Build:
+#${BUILD_NUMBER}
+
+Docker Image:
+${DOCKER_IMAGE_NAME}:${IMAGE_TAG}
+
+Manifest:
+${MANIFEST_FILE}
+
+Repository:
+${APP_REPO_URL}
+
+==================================================
+TASK
+====
+
+Analyze the failure using:
+
+1. Jenkins error section
+2. Git diagnostics
+3. Docker diagnostics
+4. Kubernetes diagnostics
+5. Helm diagnostics
+
+Determine the most likely root cause.
+
+DO NOT simply repeat the error.
+
+Correlate the evidence.
+
+For example:
+
+* Docker authentication failure
+* Docker daemon unavailable
+* Docker build failure
+* Git checkout failure
+* Git authentication failure
+* Kubernetes pod CrashLoopBackOff
+* ImagePullBackOff
+* ErrImagePull
+* Kubernetes RBAC failure
+* Helm release failure
+* Helm configuration problem
+* Network/DNS failure
+* Credential problem
+* Resource problem
+* Jenkins agent problem
+
+==================================================
+IMPORTANT
+=========
+
+You are a diagnostic AI Agent.
+
+You MUST distinguish between:
+
+* confirmed evidence
+* likely root cause
+* possible root cause
+
+Do not claim something is confirmed if the logs do not prove it.
+
+Do not invent Kubernetes resources.
+
+Do not invent Docker images.
+
+Do not invent commands that were executed.
+
+You may recommend commands that an engineer should run.
+
+==================================================
+SUGGESTED FIX
+=============
+
+Provide concrete remediation steps.
+
+If Kubernetes is involved, suggest appropriate:
+
+kubectl
+
+commands.
+
+If Docker is involved, suggest appropriate:
+
+docker
+
+commands.
+
+If Helm is involved, suggest appropriate:
+
+helm
+
+commands.
+
+If Git is involved, suggest appropriate:
+
+git
+
+commands.
+
+Do NOT perform destructive actions.
+
+Never recommend:
+
+kubectl delete
+
+helm uninstall
+
+docker system prune
+
+or other destructive commands unless explicitly requested.
+
+==================================================
+JENKINS ERROR SECTION
+=====================
+
+${extractedLog}
+
+==================================================
+DEVOPS DIAGNOSTICS
+==================
+
+${diagnostics}
+
+==================================================
+OUTPUT
+======
+
+Return ONLY valid JSON.
+
+No markdown.
+
+No code fences.
+
+No explanation outside JSON.
 
 Schema:
 
 {
-  "status":"",
-  "stage":"",
-  "root_cause":"",
-  "summary":"",
-  "confidence":0,
-  "suggested_actions":[],
-  "affected_component":"",
-  "severity":"LOW|MEDIUM|HIGH|CRITICAL"
+"status": "FAILED",
+"stage": "",
+"root_cause": "",
+"evidence": [],
+"summary": "",
+"confidence": 0,
+"affected_component": "",
+"severity": "LOW",
+"suggested_actions": [],
+"recommended_commands": [],
+"needs_human_intervention": false
 }
 
-Build Log:
+Rules:
 
-${log}
+confidence = integer from 0 to 100
+
+severity must be one of:
+
+LOW
+MEDIUM
+HIGH
+CRITICAL
+
+evidence must contain concrete observations from the logs.
+
+suggested_actions must contain practical remediation steps.
+
+recommended_commands must contain safe diagnostic/remediation commands.
+
+needs_human_intervention must be true when credentials, infrastructure,
+permissions, or another manual decision is required.
 """
 
-          writeJSON(
-            file: "ai-request.json",
-            pretty: 4,
-            json: [
-              preset: "fast-search",
-              input : prompt
-            ]
-          )
+````
+                // =================================================
+                // 6. CREATE AI REQUEST
+                // =================================================
 
-          echo "[AI] Created ai-request.json for Perplexity."
-        }
-      }
-    }
+                writeJSON(
+                    file: 'ai-request.json',
+                    pretty: 4,
+                    json: [
+                        model: 'sonar',
+                        messages: [
+                            [
+                                role: 'system',
+                                content:
+                                    'You are a senior DevOps troubleshooting AI Agent. Return only valid JSON.'
+                            ],
+                            [
+                                role: 'user',
+                                content: prompt
+                            ]
+                        ]
+                    ]
+                )
 
-    stage('Call Perplexity') {
-      when {
-        expression { currentBuild.currentResult == 'FAILURE' }
-      }
-      steps {
-        withCredentials([
-          string(
-            credentialsId: 'perplexity-api-key',
-            variable: 'PPLX_API_KEY'
-          )
-        ]) {
-          sh '''
-            set -e
+                echo "[AI] Created ai-request.json"
 
-            echo "[AI] Calling Perplexity for gold-profit-app..."
+                // =================================================
+                // 7. CALL PERPLEXITY
+                // =================================================
 
-            curl -sS https://api.perplexity.ai/v1/responses \
-              -H "Authorization: Bearer ${PPLX_API_KEY}" \
-              -H "Content-Type: application/json" \
-              --data-binary @ai-request.json \
-              -o ai-response.json
+                withCredentials([
+                    string(
+                        credentialsId: 'perplexity-api-key',
+                        variable: 'PPLX_API_KEY'
+                    )
+                ]) {
 
-            echo "[AI] Raw response from Perplexity:"
-            echo "===================================="
-            cat ai-response.json
-            echo "===================================="
-          '''
-        }
-      }
-    }
+                    sh '''
+                        set -e
 
-    stage('Parse AI Response') {
-      when {
-        expression { currentBuild.currentResult == 'FAILURE' }
-      }
-      steps {
-        script {
-          def resp = readJSON file: "ai-response.json"
+                        echo "=========================================="
+                        echo "[AI] Calling Perplexity AI Agent..."
+                        echo "=========================================="
 
-          def message = resp.output.find { it.type == "message" }
-          if (!message) {
-            error "[AI] Cannot find message object in AI response."
-          }
+                        curl -sS \
+                            --fail-with-body \
+                            --max-time 120 \
+                            https://api.perplexity.ai/chat/completions \
+                            -H "Authorization: Bearer ${PPLX_API_KEY}" \
+                            -H "Content-Type: application/json" \
+                            --data-binary @ai-request.json \
+                            -o ai-response.json
 
-          def textBlock = message.content.find { it.type == "output_text" }
-          if (!textBlock) {
-            error "[AI] Cannot find output_text in AI response."
-          }
+                        echo ""
+                        echo "[AI] Perplexity response received."
+                    '''
+                }
 
-          echo "[AI] Received JSON text from Perplexity:"
-          echo "===================================="
-          echo textBlock.text
-          echo "===================================="
+                // =================================================
+                // 8. PARSE AI RESPONSE
+                // =================================================
 
-          def ai = readJSON text: textBlock.text
+                def response =
+                    readJSON(file: 'ai-response.json')
 
-          writeJSON(
-            file: "ai-summary.json",
-            pretty: 4,
-            json: ai
-          )
+                if (!response.choices ||
+                    response.choices.size() == 0) {
 
-          currentBuild.description = """
-❌ ${ai.severity ?: 'UNKNOWN'}
+                    error "[AI] Empty Perplexity response."
+                }
 
-${ai.summary ?: 'No summary provided.'}
+                def aiText =
+                    response.choices[0].message.content
 
-Confidence: ${ai.confidence ?: 0}
-"""
+                if (!aiText?.trim()) {
 
-          def actions = ai.suggested_actions instanceof List ? ai.suggested_actions : []
+                    error "[AI] AI returned empty content."
+                }
 
-          def html = """
+                // -------------------------------------------------
+                // Remove markdown if model accidentally adds it
+                // -------------------------------------------------
+
+                aiText = aiText
+                    .replaceAll('```json', '')
+                    .replaceAll('```', '')
+                    .trim()
+
+                def ai =
+                    readJSON(text: aiText)
+
+                // =================================================
+                // 9. SAVE AI SUMMARY
+                // =================================================
+
+                writeJSON(
+                    file: 'ai-summary.json',
+                    pretty: 4,
+                    json: ai
+                )
+
+                // =================================================
+                // 10. JENKINS BUILD DESCRIPTION
+                // =================================================
+
+                def severity =
+                    ai.severity ?: 'UNKNOWN'
+
+                def stage =
+                    ai.stage ?: 'Unknown'
+
+                def summary =
+                    ai.summary ?: 'No summary provided.'
+
+                def confidence =
+                    ai.confidence ?: 0
+
+                currentBuild.description = """
+````
+
+🤖 AI DEVOPS ANALYSIS
+
+Severity: ${severity}
+Stage: ${stage}
+Confidence: ${confidence}%
+
+${summary}
+""".trim()
+
+```
+                // =================================================
+                // 11. HTML REPORT
+                // =================================================
+
+                def evidenceHtml = ''
+
+                if (ai.evidence instanceof List) {
+
+                    evidenceHtml =
+                        ai.evidence.collect { item ->
+                            "<li>${item}</li>"
+                        }.join('\n')
+
+                } else {
+
+                    evidenceHtml =
+                        '<li>No evidence provided.</li>'
+                }
+
+                def actionsHtml = ''
+
+                if (ai.suggested_actions instanceof List) {
+
+                    actionsHtml =
+                        ai.suggested_actions.collect { item ->
+                            "<li>${item}</li>"
+                        }.join('\n')
+
+                } else {
+
+                    actionsHtml =
+                        '<li>No suggested actions.</li>'
+                }
+
+                def commandsHtml = ''
+
+                if (ai.recommended_commands instanceof List) {
+
+                    commandsHtml =
+                        ai.recommended_commands.collect { command ->
+                            "<li><code>${command}</code></li>"
+                        }.join('\n')
+
+                } else {
+
+                    commandsHtml =
+                        '<li>No commands recommended.</li>'
+                }
+
+                def html = """
+```
+
+<!DOCTYPE html>
+
 <html>
+
 <head>
-  <title>AI Analysis - gold-profit-app</title>
-  <style>
-    body{
-      font-family:Arial, sans-serif;
-      margin:30px;
-    }
-    table{
-      width:100%;
-      border-collapse:collapse;
-    }
-    td,th{
-      border:1px solid #ddd;
-      padding:8px;
-    }
-    th{
-      background:#efefef;
-      text-align:left;
-    }
-    h2, h3{
-      margin-top:24px;
-    }
-  </style>
+
+<meta charset="UTF-8">
+
+<title>AI DevOps Analysis</title>
+
+<style>
+
+body {
+    font-family:
+        -apple-system,
+        BlinkMacSystemFont,
+        "Segoe UI",
+        Arial,
+        sans-serif;
+
+    background: #f5f6f8;
+    margin: 0;
+    padding: 40px;
+}
+
+.container {
+    max-width: 1100px;
+    margin: auto;
+    background: white;
+    padding: 35px;
+    border-radius: 12px;
+}
+
+h1 {
+    margin-top: 0;
+}
+
+h2 {
+    margin-top: 30px;
+}
+
+.meta {
+    background: #f1f3f5;
+    padding: 20px;
+    border-radius: 8px;
+}
+
+.meta p {
+    margin: 8px 0;
+}
+
+.label {
+    font-weight: bold;
+}
+
+.summary {
+    font-size: 18px;
+    line-height: 1.6;
+}
+
+.root-cause {
+    background: #fff3cd;
+    padding: 20px;
+    border-radius: 8px;
+    line-height: 1.6;
+}
+
+.evidence {
+    line-height: 1.8;
+}
+
+.actions {
+    line-height: 1.8;
+}
+
+.commands {
+    line-height: 2;
+}
+
+code {
+    background: #f1f3f5;
+    padding: 5px 8px;
+    border-radius: 5px;
+}
+
+</style>
+
 </head>
+
 <body>
 
-  <h2>AI Analysis for gold-profit-app</h2>
+<div class="container">
 
-  <table>
-    <tr><th>Status</th><td>${ai.status}</td></tr>
-    <tr><th>Stage</th><td>${ai.stage}</td></tr>
-    <tr><th>Severity</th><td>${ai.severity}</td></tr>
-    <tr><th>Root Cause</th><td>${ai.root_cause}</td></tr>
-    <tr><th>Summary</th><td>${ai.summary}</td></tr>
-    <tr><th>Confidence</th><td>${ai.confidence}</td></tr>
-    <tr><th>Affected Component</th><td>${ai.affected_component}</td></tr>
-  </table>
+<h1>🤖 AI DevOps Failure Analysis</h1>
 
-  <h3>Suggested Actions</h3>
-  <ul>
-    ${actions.collect { "<li>${it}</li>" }.join("\\n")}
-  </ul>
+<div class="meta">
+
+<p>
+<span class="label">Application:</span>
+gold-profit-app
+</p>
+
+<p>
+<span class="label">Build:</span>
+#${BUILD_NUMBER}
+</p>
+
+<p>
+<span class="label">Failed Stage:</span>
+${stage}
+</p>
+
+<p>
+<span class="label">Severity:</span>
+${severity}
+</p>
+
+<p>
+<span class="label">Confidence:</span>
+${confidence}%
+</p>
+
+<p>
+<span class="label">Affected Component:</span>
+${ai.affected_component ?: 'Unknown'}
+</p>
+
+<p>
+<span class="label">Human Intervention:</span>
+${ai.needs_human_intervention ?: false}
+</p>
+
+</div>
+
+<h2>Summary</h2>
+
+<div class="summary">
+
+${summary}
+
+</div>
+
+<h2>Root Cause</h2>
+
+<div class="root-cause">
+
+${ai.root_cause ?: 'No root cause provided.'}
+
+</div>
+
+<h2>Evidence</h2>
+
+<ul class="evidence">
+
+${evidenceHtml}
+
+</ul>
+
+<h2>Suggested Fix</h2>
+
+<ul class="actions">
+
+${actionsHtml}
+
+</ul>
+
+<h2>Recommended Commands</h2>
+
+<ul class="commands">
+
+${commandsHtml}
+
+</ul>
+
+</div>
 
 </body>
+
 </html>
 """
 
-          writeFile(
-            file: "ai-summary.html",
-            text: html
-          )
+```
+                writeFile(
+                    file: 'ai-summary.html',
+                    text: html
+                )
 
-          echo "[AI] Wrote ai-summary.json and ai-summary.html."
+                // =================================================
+                // 12. PUBLISH REPORT
+                // =================================================
+
+                publishHTML(
+                    target: [
+                        reportDir: '.',
+                        reportFiles: 'ai-summary.html',
+                        reportName: 'AI DevOps Analysis',
+                        keepAll: true,
+                        alwaysLinkToLastBuild: true,
+                        allowMissing: true
+                    ]
+                )
+
+                echo "=========================================="
+                echo "🤖 AI DevOps analysis completed"
+                echo "Severity   : ${severity}"
+                echo "Stage      : ${stage}"
+                echo "Confidence : ${confidence}%"
+                echo "=========================================="
+
+            } catch (Exception e) {
+
+                // =================================================
+                // AI FAILURE MUST NOT MASK ORIGINAL FAILURE
+                // =================================================
+
+                echo "=========================================="
+                echo "⚠️ AI analysis failed"
+                echo "Reason: ${e.getMessage()}"
+                echo "=========================================="
+
+                writeFile(
+                    file: 'ai-error.txt',
+                    text: e.toString()
+                )
+            }
         }
-      }
     }
 
-    stage('Publish AI Report') {
-      when {
-        expression { currentBuild.currentResult == 'FAILURE' }
-      }
-      steps {
-        publishHTML(target: [
-          reportDir: '.',
-          reportFiles: 'ai-summary.html',
-          reportName: 'AI Analysis - gold-profit-app',
-          keepAll: true,
-          alwaysLinkToLastBuild: true
-        ])
-
-        echo "[AI] Published AI Analysis HTML report."
-      }
-    }
-  }
-
-  post {
-    success {
-      echo "✅ Pipeline finished successfully for gold-profit-app."
-    }
-
-    failure {
-      echo "❌ Pipeline failed for gold-profit-app – AI analysis generated (check report & description)."
-    }
-
+    // =========================================================
+    // ALWAYS
+    // =========================================================
     always {
-      archiveArtifacts artifacts: '''
-jenkins.log,
-ai-request.json,
-ai-response.json,
-ai-summary.json,
-ai-summary.html
-'''
+
+        echo "[Pipeline] Archiving diagnostic artifacts..."
+
+        archiveArtifacts(
+            artifacts: '''
+                jenkins-full.log,
+                jenkins-error.log,
+                git-diagnostics.log,
+                docker-diagnostics.log,
+                k8s-diagnostics.log,
+                helm-diagnostics.log,
+                devops-diagnostics.log,
+                ai-request.json,
+                ai-response.json,
+                ai-summary.json,
+                ai-summary.html,
+                ai-error.txt
+            ''',
+            allowEmptyArchive: true,
+            fingerprint: true
+        )
     }
-  }
+}
+```
+
 }

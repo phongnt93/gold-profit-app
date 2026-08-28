@@ -1,0 +1,21 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: gold-profit-smoke-test
+  namespace: gold-profit-app-demo
+  annotations:
+    argocd.argoproj.io/hook: PostSync
+    argocd.argoproj.io/hook-delete-policy: HookSucceeded
+spec:
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: curl
+          image: curlimages/curl:8.8.0
+          args:
+            - sh
+            - -c
+            - >
+              echo "Smoke test gold-profit-app...";
+              curl -sf --insecure https://gold-app.local/health && echo "OK" || { echo "FAILED"; exit 1; }

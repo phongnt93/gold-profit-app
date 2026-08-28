@@ -2,9 +2,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: gold-profit-app
-  namespace: gold-app
-  labels:
-    app: gold-profit-app
+  namespace: gold-profit-app-demo
 spec:
   replicas: 1
   selector:
@@ -15,47 +13,54 @@ spec:
       labels:
         app: gold-profit-app
     spec:
+      imagePullSecrets:
+        - name: dockerhub-secret
       containers:
         - name: gold-profit-app
-          # Jenkins sẽ thay IMAGE_PLACEHOLDER bằng image đầy đủ,
-          # ví dụ: phongnt93/gold-profit-app:BUILD_NUMBER
-          image: IMAGE_PLACEHOLDER
-          imagePullPolicy: Always
+          image: nguyenphong8852/gold-profit-app:19
           ports:
-            - containerPort: 8080
-          envFrom:
-            - configMapRef:
-                name: gold-profit-app-config
-          # nếu muốn override rõ:
-          # env:
-          #   - name: PORT
-          #     valueFrom:
-          #       configMapKeyRef:
-          #         name: gold-profit-app-config
-          #         key: PORT
-          volumeMounts:
-            - name: data
-              mountPath: /app/data
+            - containerPort: 3000   # sửa theo server.js / Dockerfile
           readinessProbe:
             httpGet:
-              path: /api/health
-              port: 8080
+              path: /health         # sửa theo endpoint thật
+              port: 3000
             initialDelaySeconds: 5
             periodSeconds: 10
-          livenessProbe:
-            httpGet:
-              path: /api/health
-              port: 8080
-            initialDelaySeconds: 15
-            periodSeconds: 20
-          resources:
-            requests:
-              cpu: "50m"
-              memory: "128Mi"
-            limits:
-              cpu: "500m"
-              memory: "512Mi"
-      volumes:
-        - name: data
-          persistentVolumeClaim:
-            claimName: gold-app-data-pvc
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: gold-profit-app
+  namespace: gold-profit-app-demo
+spec:
+  type: ClusterIP
+  selector:
+    app: gold-profit-app
+  ports:
+    - port: 80
+      targetPort: 3000
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: gold-profit-app
+  namespace: gold-profit-app-demo
+  annotations:
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+spec:
+  ingressClassName: nginx
+  tls:
+    - secretName: gold-profit-app-tls       # cert riêng cho gold-app.local
+      hosts:
+        - gold-app.local
+  rules:
+    - host: gold-app.local
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: gold-profit-app
+                port:
+                  number: 80

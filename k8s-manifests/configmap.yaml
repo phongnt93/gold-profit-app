@@ -2,7 +2,7 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: gold-profit-app-config
-  namespace: gold-app
+  namespace: gold-profit-app-demo
 data:
   APP_NAME: "gold-profit-app"
   APP_ENV: "demo"

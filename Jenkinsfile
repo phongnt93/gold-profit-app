@@ -34,66 +34,95 @@ spec:
         }
     }
 
+    options {
+        // Stage 'Checkout' bên dưới đã checkout rồi, bỏ checkout mặc định cho đỡ fetch 2 lần
+        skipDefaultCheckout(true)
+    }
+
     environment {
         APP_NAME          = 'gold-profit-app'                         // ArgoCD Application
         DOCKER_IMAGE_NAME = 'nguyenphong8852/gold-profit-app'
         IMAGE_TAG         = "${BUILD_NUMBER}"
         MANIFEST_FILE     = 'k8s-manifests/deployment.yaml'
+
+        // Trạng thái từng stage, dùng để đưa vào log cho AI phân tích
+        STATUS_CHECKOUT   = 'NOT_RUN'
+        STATUS_BUILD      = 'NOT_RUN'
+        STATUS_MANIFEST   = 'NOT_RUN'
     }
 
     stages {
         stage('Checkout') {
             steps {
-                checkout scm
                 script {
-                    echo "Building image (Kaniko): ${DOCKER_IMAGE_NAME}:${IMAGE_TAG}"
+                    runTracked('CHECKOUT') {
+                        checkout scm
+                        echo "Building image (Kaniko): ${DOCKER_IMAGE_NAME}:${IMAGE_TAG}"
+                    }
                 }
             }
         }
 
         stage('Build & Push Image (Kaniko)') {
+            when { expression { env.STATUS_CHECKOUT == 'SUCCESS' } }
             steps {
-                withCredentials([
-                    usernamePassword(
-                        credentialsId: 'dockerhub-credentials',
-                        usernameVariable: 'DOCKER_USERNAME',
-                        passwordVariable: 'DOCKER_PASSWORD'
-                    )
-                ]) {
-                    container('kaniko') {
-                        sh '''
-                            set -e
+                script {
+                    runTracked('BUILD') {
+                        withCredentials([
+                            usernamePassword(
+                                credentialsId: 'dockerhub-credentials',
+                                usernameVariable: 'DOCKER_USERNAME',
+                                passwordVariable: 'DOCKER_PASSWORD'
+                            )
+                        ]) {
+                            container('kaniko') {
+                                sh '''
+                                    set -e
 
-                            echo "Preparing Docker Hub credentials for Kaniko..."
-                            mkdir -p /kaniko/.docker
+                                    echo "Preparing Docker Hub credentials for Kaniko..."
+                                    mkdir -p /kaniko/.docker
 
-                            cat > /kaniko/.docker/config.json <<EOF
+                                    cat > /kaniko/.docker/config.json <<EOF
 {"auths":{"https://index.docker.io/v1/":{"auth":"$(printf "%s:%s" "$DOCKER_USERNAME" "$DOCKER_PASSWORD" | base64 | tr -d '\\n')"}}}
 EOF
 
-                            echo "Building & pushing image with Kaniko..."
-                            /kaniko/executor \
-                              --dockerfile=$WORKSPACE/Dockerfile \
-                              --context=$WORKSPACE \
-                              --destination=$DOCKER_IMAGE_NAME:$IMAGE_TAG \
-                              --cleanup
+                                    echo "Building & pushing image with Kaniko..."
+                                    /kaniko/executor \
+                                      --dockerfile=$WORKSPACE/Dockerfile \
+                                      --context=$WORKSPACE \
+                                      --destination=$DOCKER_IMAGE_NAME:$IMAGE_TAG \
+                                      --cleanup
 
-                            echo "Kaniko build & push completed."
-                        '''
+                                    echo "Kaniko build & push completed."
+                                '''
+                            }
+                        }
                     }
                 }
             }
         }
 
         stage('Update K8s Manifest') {
+            // Chỉ cập nhật manifest khi image đã được push thành công
+            when { expression { env.STATUS_BUILD == 'SUCCESS' } }
             steps {
-                updateK8sManifest(
-                    DOCKER_IMAGE_NAME,
-                    IMAGE_TAG,
-                    MANIFEST_FILE,
-                    'github-credentials',
-                    'https://github.com/phongnt93/gold-profit-app.git'
-                )
+                script {
+                    runTracked('MANIFEST') {
+                        // Thư viện nhận gitRepo dạng host/path, KHÔNG có https://
+                        // -> tự lấy từ remote của repo đang build, nên Jenkinsfile dùng chung được cho nhiều repo
+                        def gitRepo = sh(script: 'git config --get remote.origin.url', returnStdout: true)
+                                        .trim()
+                                        .replaceFirst('^https?://', '')
+
+                        updateK8sManifest(
+                            env.DOCKER_IMAGE_NAME,
+                            env.IMAGE_TAG,
+                            env.MANIFEST_FILE,
+                            'github-credentials',
+                            gitRepo
+                        )
+                    }
+                }
             }
         }
 
@@ -149,26 +178,30 @@ exit 0
                         : 'No ArgoCD log captured.'
 
                     def logText = """
-[Pipeline] Project: gold-profit-app
+[Pipeline] Project: ${APP_NAME}
 
 [Checkout]
 Source: ${env.GIT_URL ?: 'SCM'}
 Branch: ${env.GIT_BRANCH ?: 'main'}
-Status: SUCCESS
+Status: ${env.STATUS_CHECKOUT}
+${env.ERROR_CHECKOUT ? 'Error: ' + env.ERROR_CHECKOUT : ''}
 
 [Build & Push Image (Kaniko)]
 Image: ${DOCKER_IMAGE_NAME}:${IMAGE_TAG}
-Status: ${currentBuild.result ?: 'SUCCESS'}
+Status: ${env.STATUS_BUILD}
+${env.ERROR_BUILD ? 'Error: ' + env.ERROR_BUILD : ''}
 
 [Update K8s Manifest]
 Manifest: ${MANIFEST_FILE}
-Git repo: https://github.com/phongnt93/gold-profit-app.git
-Status: ${currentBuild.result ?: 'SUCCESS'}
+Git repo: ${env.GIT_URL ?: 'SCM'}
+Status: ${env.STATUS_MANIFEST}
+${env.ERROR_MANIFEST ? 'Error: ' + env.ERROR_MANIFEST : ''}
 
 [ArgoCD]
 ${argocdInfo}
 
 Notes:
+- Stage status NOT_RUN means the stage was skipped because an earlier stage failed.
 - ArgoCD Auto-Sync + Self-Heal are enabled.
 - PostSync Job 'gold-profit-smoke-test' runs a smoke test against https://gold-app.local/health.
 
@@ -299,9 +332,17 @@ Confidence: ${ai.confidence}
                         currentBuild.result = 'UNSTABLE'
                     }
 
+                    // Escape HTML để nội dung AI trả về không làm vỡ trang
+                    def esc = { s ->
+                        "${s}".replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+                    }
+
+                    def actionsHtml = ai.suggested_actions.collect { "<li>${esc(it)}</li>" }.join('\n')
+
                     def html = """
 <html>
 <head>
+<meta charset="UTF-8">
 <title>AI Analysis</title>
 <style>
 body{
@@ -323,21 +364,21 @@ th{
 </head>
 <body>
 
-<h2>AI Analysis (Jenkins + ArgoCD – gold-profit-app)</h2>
+<h2>AI Analysis (Jenkins + ArgoCD – ${APP_NAME})</h2>
 
 <table>
-<tr><th>Status</th><td>${ai.status}</td></tr>
-<tr><th>Stage</th><td>${ai.stage}</td></tr>
-<tr><th>Severity</th><td>${ai.severity}</td></tr>
-<tr><th>Root Cause</th><td>${ai.root_cause}</td></tr>
-<tr><th>Summary</th><td>${ai.summary}</td></tr>
-<tr><th>Confidence</th><td>${ai.confidence}</td></tr>
-<tr><th>Affected Component</th><td>${ai.affected_component}</td></tr>
+<tr><th>Status</th><td>${esc(ai.status)}</td></tr>
+<tr><th>Stage</th><td>${esc(ai.stage)}</td></tr>
+<tr><th>Severity</th><td>${esc(ai.severity)}</td></tr>
+<tr><th>Root Cause</th><td>${esc(ai.root_cause)}</td></tr>
+<tr><th>Summary</th><td>${esc(ai.summary)}</td></tr>
+<tr><th>Confidence</th><td>${esc(ai.confidence)}</td></tr>
+<tr><th>Affected Component</th><td>${esc(ai.affected_component)}</td></tr>
 </table>
 
 <h3>Suggested Actions</h3>
 <ul>
-${ai.suggested_actions.collect { ">${it}</li>" }.join("\\n")}
+${actionsHtml}
 </ul>
 
 </body>
@@ -357,7 +398,7 @@ ${ai.suggested_actions.collect { ">${it}</li>" }.join("\\n")}
                 publishHTML(target: [
                     reportDir: '.',
                     reportFiles: 'ai-summary.html',
-                    reportName: 'AI Analysis – gold-profit-app',
+                    reportName: "AI Analysis – ${APP_NAME}",
                     keepAll: true,
                     alwaysLinkToLastBuild: true
                 ])
@@ -367,14 +408,8 @@ ${ai.suggested_actions.collect { ">${it}</li>" }.join("\\n")}
 
     post {
         always {
-            archiveArtifacts artifacts: '''
-jenkins.log,
-argocd.log,
-ai-request.json,
-ai-response.json,
-ai-summary.json,
-ai-summary.html
-'''
+            archiveArtifacts artifacts: 'jenkins.log,argocd.log,ai-request.json,ai-response.json,ai-summary.json,ai-summary.html',
+                             allowEmptyArchive: true
         }
 
         success {
@@ -382,6 +417,25 @@ ai-summary.html
         }
         failure {
             echo "Build failed – see AI Analysis and ArgoCD logs for details."
+        }
+    }
+}
+
+/**
+ * Chạy một khối lệnh, ghi lại trạng thái (SUCCESS/FAILURE) và lỗi vào env.
+ * catchError đánh dấu stage + build là FAILURE nhưng KHÔNG dừng pipeline,
+ * nên các stage thu thập ArgoCD và phân tích AI vẫn chạy sau khi có lỗi.
+ */
+def runTracked(String key, Closure body) {
+    env."STATUS_${key}" = 'RUNNING'
+    catchError(buildResult: 'FAILURE', stageResult: 'FAILURE') {
+        try {
+            body()
+            env."STATUS_${key}" = 'SUCCESS'
+        } catch (err) {
+            env."STATUS_${key}" = 'FAILURE'
+            env."ERROR_${key}"  = (err.message ?: err.toString()).take(500)
+            throw err
         }
     }
 }

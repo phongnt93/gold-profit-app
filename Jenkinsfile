@@ -56,7 +56,14 @@ spec:
             steps {
                 script {
                     runTracked('CHECKOUT') {
-                        checkout scm
+                        // Mạng tới GitHub đôi khi đứt giữa chừng (TLS early EOF) -> thử lại, nghỉ 10s giữa các lần
+                        def attempt = 0
+                        retry(3) {
+                            if (attempt++ > 0) {
+                                sleep(time: 10, unit: 'SECONDS')
+                            }
+                            checkout scm
+                        }
                         echo "Building image (Kaniko): ${DOCKER_IMAGE_NAME}:${IMAGE_TAG}"
                     }
                 }
@@ -431,7 +438,7 @@ ${actionsHtml}
                 publishHTML(target: [
                     reportDir: '.',
                     reportFiles: 'ai-summary.html',
-                    reportName: "AI Analysis – ${APP_NAME}",
+                    reportName: "AI Analysis - ${APP_NAME}",
                     keepAll: true,
                     alwaysLinkToLastBuild: true
                 ])
@@ -468,7 +475,8 @@ def runTracked(String key, Closure body) {
         } catch (err) {
             env."STATUS_${key}" = 'FAILURE'
             def msg = (err.message ?: err.toString()).toString()
-            env."ERROR_${key}"  = msg.length() > 500 ? msg.substring(0, 500) : msg
+            // Giữ đầu + cuối: git/kaniko in rất nhiều dòng progress ở giữa, nguyên nhân thật nằm ở cuối
+            env."ERROR_${key}"  = msg.length() > 700 ? msg.substring(0, 200) + ' ... ' + msg.substring(msg.length() - 500) : msg
             throw err
         }
     }

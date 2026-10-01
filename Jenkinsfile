@@ -44,11 +44,11 @@ spec:
         DOCKER_IMAGE_NAME = 'nguyenphong8852/gold-profit-app'
         IMAGE_TAG         = "${BUILD_NUMBER}"
         MANIFEST_FILE     = 'k8s-manifests/deployment.yaml'
+        GEMINI_MODEL      = 'gemini-3.5-flash'                        // đổi model tại đây
 
-        // Trạng thái từng stage, dùng để đưa vào log cho AI phân tích
-        STATUS_CHECKOUT   = 'NOT_RUN'
-        STATUS_BUILD      = 'NOT_RUN'
-        STATUS_MANIFEST   = 'NOT_RUN'
+        // LƯU Ý: không khai báo STATUS_* / ERROR_* ở đây. Biến khai báo trong environment{}
+        // được bọc bằng withEnv nên env.X = '...' trong script sẽ KHÔNG ghi đè được.
+        // Các biến này do runTracked() tạo ra khi chạy; khi đọc dùng env.STATUS_X ?: 'NOT_RUN'.
     }
 
     stages {
@@ -183,18 +183,18 @@ exit 0
 [Checkout]
 Source: ${env.GIT_URL ?: 'SCM'}
 Branch: ${env.GIT_BRANCH ?: 'main'}
-Status: ${env.STATUS_CHECKOUT}
+Status: ${env.STATUS_CHECKOUT ?: 'NOT_RUN'}
 ${env.ERROR_CHECKOUT ? 'Error: ' + env.ERROR_CHECKOUT : ''}
 
 [Build & Push Image (Kaniko)]
 Image: ${DOCKER_IMAGE_NAME}:${IMAGE_TAG}
-Status: ${env.STATUS_BUILD}
+Status: ${env.STATUS_BUILD ?: 'NOT_RUN'}
 ${env.ERROR_BUILD ? 'Error: ' + env.ERROR_BUILD : ''}
 
 [Update K8s Manifest]
 Manifest: ${MANIFEST_FILE}
 Git repo: ${env.GIT_URL ?: 'SCM'}
-Status: ${env.STATUS_MANIFEST}
+Status: ${env.STATUS_MANIFEST ?: 'NOT_RUN'}
 ${env.ERROR_MANIFEST ? 'Error: ' + env.ERROR_MANIFEST : ''}
 
 [ArgoCD]
@@ -257,25 +257,28 @@ ${log}
                         file: "ai-request.json",
                         pretty: 4,
                         json: [
-                            preset: "fast-search",
-                            input : prompt
+                            contents        : [[parts: [[text: prompt]]]],
+                            generationConfig: [
+                                responseMimeType: 'application/json',
+                                temperature     : 0.2
+                            ]
                         ]
                     )
                 }
             }
         }
 
-        stage('Call Perplexity') {
+        stage('Call Gemini') {
             steps {
                 withCredentials([
                     string(
-                        credentialsId: 'perplexity-api-key',
-                        variable: 'PPLX_API_KEY'
+                        credentialsId: 'gemini-api-key',
+                        variable: 'GEMINI_API_KEY'
                     )
                 ]) {
                     sh '''
-curl -sS https://api.perplexity.ai/v1/responses \
-  -H "Authorization: Bearer ${PPLX_API_KEY}" \
+curl -sS "https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent" \
+  -H "x-goog-api-key: ${GEMINI_API_KEY}" \
   -H "Content-Type: application/json" \
   --data-binary @ai-request.json \
   -o ai-response.json
@@ -290,26 +293,51 @@ cat ai-response.json
         stage('Parse AI Response') {
             steps {
                 script {
-                    def resp = readJSON file: "ai-response.json"
-
-                    def message = resp.output.find { it.type == "message" }
-                    if (message == null) {
-                        error("Cannot find message object in response.")
+                    def resp
+                    try {
+                        resp = readJSON file: "ai-response.json"
+                    } catch (Exception e) {
+                        unstable("AI analysis skipped: cannot parse ai-response.json (${e.message})")
+                        return
                     }
 
-                    def textBlock = message.content.find { it.type == "output_text" }
-                    if (textBlock == null) {
-                        error("Cannot find output_text in response.")
+                    // API trả lỗi (sai key, hết quota, sai model, ...) -> bỏ qua phân tích AI, không làm vỡ pipeline
+                    if (resp.error) {
+                        unstable("AI analysis skipped, Gemini API error: ${resp.error.message}")
+                        return
+                    }
+
+                    // Gộp text của candidate đầu tiên (dùng vòng lặp vì sandbox chặn .find { })
+                    def aiText = ''
+                    if (resp.candidates) {
+                        def first = resp.candidates[0]
+                        if (first.content) {
+                            for (part in first.content.parts) {
+                                if (part.text) {
+                                    aiText += part.text
+                                }
+                            }
+                        }
+                    }
+                    if (!aiText) {
+                        unstable("AI analysis skipped: Gemini returned no text (blockReason=${resp.promptFeedback?.blockReason}, finishReason=${resp.candidates ? resp.candidates[0].finishReason : 'n/a'})")
+                        return
+                    }
+
+                    // Phòng khi model vẫn bọc JSON trong ```json ... ```
+                    def cleaned = aiText.trim()
+                    if (cleaned.startsWith('```')) {
+                        cleaned = cleaned.replaceAll('^```[a-zA-Z]*\\s*', '').replaceAll('\\s*```$', '')
                     }
 
                     echo "=========== AI JSON RAW ==========="
-                    echo textBlock.text
+                    echo cleaned
 
                     def ai
                     try {
-                        ai = readJSON text: textBlock.text
+                        ai = readJSON text: cleaned
                     } catch (Exception e) {
-                        error("AI output is not valid JSON: ${e.message}\nOutput:\n${textBlock.text}")
+                        error("AI output is not valid JSON: ${e.message}\nOutput:\n${cleaned}")
                     }
 
                     writeJSON(
@@ -333,11 +361,15 @@ Confidence: ${ai.confidence}
                     }
 
                     // Escape HTML để nội dung AI trả về không làm vỡ trang
-                    def esc = { s ->
-                        "${s}".replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+                    def esc = { v ->
+                        def t = (v == null) ? '' : v.toString()
+                        return t.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
                     }
 
-                    def actionsHtml = ai.suggested_actions.collect { "<li>${esc(it)}</li>" }.join('\n')
+                    def actionsHtml = ''
+                    for (a in ai.suggested_actions) {
+                        actionsHtml += '<li>' + esc(a) + '</li>\n'
+                    }
 
                     def html = """
 <html>
@@ -394,6 +426,7 @@ ${actionsHtml}
         }
 
         stage('Publish HTML') {
+            when { expression { fileExists('ai-summary.html') } }
             steps {
                 publishHTML(target: [
                     reportDir: '.',
@@ -434,7 +467,8 @@ def runTracked(String key, Closure body) {
             env."STATUS_${key}" = 'SUCCESS'
         } catch (err) {
             env."STATUS_${key}" = 'FAILURE'
-            env."ERROR_${key}"  = (err.message ?: err.toString()).take(500)
+            def msg = (err.message ?: err.toString()).toString()
+            env."ERROR_${key}"  = msg.length() > 500 ? msg.substring(0, 500) : msg
             throw err
         }
     }

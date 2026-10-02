@@ -22,7 +22,7 @@ spec:
             - containerPort: 8080   # sửa theo server.js / Dockerfile
           readinessProbe:
             httpGet:
-              path: /health         # sửa theo endpoint thật
+              path: /       
               port: 8080
             initialDelaySeconds: 5
             periodSeconds: 10

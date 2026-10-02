@@ -19,11 +19,11 @@ spec:
         - name: gold-profit-app
           image: nguyenphong8852/gold-profit-app:19
           ports:
-            - containerPort: 3000   # sửa theo server.js / Dockerfile
+            - containerPort: 8080   # sửa theo server.js / Dockerfile
           readinessProbe:
             httpGet:
               path: /health         # sửa theo endpoint thật
-              port: 3000
+              port: 8080
             initialDelaySeconds: 5
             periodSeconds: 10
 ---
@@ -38,7 +38,7 @@ spec:
     app: gold-profit-app
   ports:
     - port: 80
-      targetPort: 3000
+      targetPort: 8080
 ---
 apiVersion: networking.k8s.io/v1
 kind: Ingress

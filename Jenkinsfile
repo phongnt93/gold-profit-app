@@ -94,11 +94,22 @@ spec:
 EOF
 
                                     echo "Building & pushing image with Kaniko..."
-                                    /kaniko/executor \
-                                      --dockerfile=$WORKSPACE/Dockerfile \
-                                      --context=$WORKSPACE \
-                                      --destination=$DOCKER_IMAGE_NAME:$IMAGE_TAG \
-                                      --cleanup
+                                    # Ghi log ra file (để đưa phần cuối cho AI) mà vẫn in realtime.
+                                    # Pipeline qua tee luôn trả về 0 nên phải lưu exit code thật của kaniko.
+                                    {
+                                      set +e
+                                      /kaniko/executor \
+                                        --dockerfile=$WORKSPACE/Dockerfile \
+                                        --context=$WORKSPACE \
+                                        --destination=$DOCKER_IMAGE_NAME:$IMAGE_TAG \
+                                        --image-download-retry=3 \
+                                        --image-fs-extract-retry=3 \
+                                        --push-retry=3 \
+                                        --cleanup
+                                      echo $? > $WORKSPACE/kaniko.rc
+                                    } 2>&1 | tee $WORKSPACE/kaniko.log
+                                    RC=$(cat $WORKSPACE/kaniko.rc)
+                                    [ "$RC" -eq 0 ] || { echo "Kaniko failed with exit code $RC"; exit "$RC"; }
 
                                     echo "Kaniko build & push completed."
                                 '''
@@ -150,8 +161,19 @@ echo "===== Collecting ArgoCD status (best effort) =====" > argocd.log
 if ! command -v argocd >/dev/null 2>&1; then
   echo "argocd CLI not found, downloading..." >> argocd.log
   mkdir -p /tmp/argocd-bin
-  curl -sSL -o /tmp/argocd-bin/argocd https://github.com/argoproj/argo-cd/releases/latest/download/argocd-linux-amd64
-  chmod +x /tmp/argocd-bin/argocd
+  for i in 1 2 3; do
+    rm -f /tmp/argocd-bin/argocd
+    curl -fsSL --retry 3 --retry-all-errors --retry-delay 3 \
+      -o /tmp/argocd-bin/argocd \
+      https://github.com/argoproj/argo-cd/releases/latest/download/argocd-linux-amd64 >> argocd.log 2>&1
+    chmod +x /tmp/argocd-bin/argocd
+    # Binary tải cụt/hỏng sẽ gây "Bus error" khi chạy -> kiểm tra rồi tải lại
+    if /tmp/argocd-bin/argocd version --client >/dev/null 2>&1; then
+      break
+    fi
+    echo "argocd download attempt $i failed or binary is corrupt" >> argocd.log
+    sleep 3
+  done
   export PATH="/tmp/argocd-bin:$PATH"
 else
   echo "argocd CLI already available at $(command -v argocd)" >> argocd.log
@@ -184,6 +206,12 @@ exit 0
                         ? readFile('argocd.log')
                         : 'No ArgoCD log captured.'
 
+                    // Khi build image lỗi, đưa 25 dòng cuối của Kaniko để AI thấy nguyên nhân thật
+                    def kanikoTail = ''
+                    if (env.STATUS_BUILD == 'FAILURE' && fileExists('kaniko.log')) {
+                        kanikoTail = sh(script: 'tail -n 25 kaniko.log', returnStdout: true).trim()
+                    }
+
                     def logText = """
 [Pipeline] Project: ${APP_NAME}
 
@@ -197,6 +225,7 @@ ${env.ERROR_CHECKOUT ? 'Error: ' + env.ERROR_CHECKOUT : ''}
 Image: ${DOCKER_IMAGE_NAME}:${IMAGE_TAG}
 Status: ${env.STATUS_BUILD ?: 'NOT_RUN'}
 ${env.ERROR_BUILD ? 'Error: ' + env.ERROR_BUILD : ''}
+${kanikoTail ? 'Kaniko log (last lines):\n' + kanikoTail : ''}
 
 [Update K8s Manifest]
 Manifest: ${MANIFEST_FILE}
@@ -448,7 +477,7 @@ ${actionsHtml}
 
     post {
         always {
-            archiveArtifacts artifacts: 'jenkins.log,argocd.log,ai-request.json,ai-response.json,ai-summary.json,ai-summary.html',
+            archiveArtifacts artifacts: 'jenkins.log,kaniko.log,argocd.log,ai-request.json,ai-response.json,ai-summary.json,ai-summary.html',
                              allowEmptyArchive: true
         }
 
